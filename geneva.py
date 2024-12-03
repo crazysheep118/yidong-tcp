@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# iptables: iptables -t mangle -A OUTPUT -p tcp --sport 80 -m tcp --tcp-flags SYN,ACK,ACK SYN,ACK -j NFQUEUE --queue-num 100
 
 import os
 import signal
@@ -8,12 +9,29 @@ import argparse
 import sys
 import threading
 import traceback
+import time
 
 
 window_size = 17
 edit_times = {}
 window_scale = 7
 confusion_times = 7
+split_number = 7
+
+
+def cleanup_edit_times(edit_times):
+    while True:
+        current_time = time.time()
+        keys_to_delete = [] 
+        
+        for key, value in list(edit_times.items()):
+            created_time = value[0]
+            if current_time - created_time >= 10:
+                try:
+                    del edit_times[key]
+                except:
+                    pass
+        time.sleep(10) 
 
 
 def clear_window_scale(ip_layer):
@@ -33,49 +51,35 @@ def modify_window(pkt):
     global edit_times
     try:
         ip = IP(pkt.get_payload())
-        sa = False
-
         if ip.haslayer(TCP):
             key = f"{ip.dst}_{ip[TCP].dport}"
 
-            if ip.haslayer(TCP) and ip[TCP].flags == "SA":
-                edit_times[key] = 1
+            if ip[TCP].flags == "SA":
+                edit_times[key] = [time.time(), 1]
                 ip = clear_window_scale(ip)
                 ip[TCP].window = window_size
                 del ip[IP].chksum
                 del ip[TCP].chksum
                 pkt.set_payload(bytes(ip))
-                sa = True
 
-            elif ip.haslayer(TCP) and ip[TCP].flags == "FA":
-                ip[TCP].window = window_size
-                del ip[IP].chksum
-                del ip[TCP].chksum
-                pkt.set_payload(bytes(ip))
-            elif ip.haslayer(TCP) and ip[TCP].flags == "PA":
-                ip[TCP].window = window_size
-                del ip[IP].chksum
-                del ip[TCP].chksum
-                pkt.set_payload(bytes(ip))
-            elif ip.haslayer(TCP) and ip[TCP].flags == "A":
+                thread = threading.Thread(target=send_payloads, args=(ip, ))
+                thread.start()
+            elif ip[TCP].flags == "A":
                 if not key in edit_times:
-                    edit_times[key] = 1
-                if edit_times[key] <= 6:
+                    edit_times[key] = [time.time(), 1]
+                if edit_times[key][1] < split_number:
                     ip[TCP].window = window_size
                 else:
                     ip[TCP].window = 28960
-                edit_times[key] += 1
+                edit_times[key][1] += 1
                 del ip[IP].chksum
                 del ip[TCP].chksum
                 pkt.set_payload(bytes(ip))
-
     except Exception as e:
-        print(traceback.format_exc())
-
-    if sa:
-        thread = threading.Thread(target=send_payloads, args=(ip, ))
-        thread.start()
+        # print(traceback.format_exc())
+        pass
     pkt.accept()
+
 
 
 def send_payloads(ip):
@@ -92,12 +96,15 @@ def parsearg():
     global window_size
     global window_scale
     global confusion_times
+    global split_number
     parser = argparse.ArgumentParser(description='Description of your program')
 
     parser.add_argument('-q', '--queue', type=int, help='iptables Queue Num')
     parser.add_argument('-w', '--window_size', type=int, help='Tcp Window Size')
     parser.add_argument('-s', '--window_scale', type=int, help='Tcp Window Scale')
     parser.add_argument('-c', '--confusion_times', type=int, help='confusion_times')
+    parser.add_argument('-n', '--split_number', type=int, help='Tcp Split Number')
+
 
     args = parser.parse_args()
 
@@ -107,10 +114,13 @@ def parsearg():
     window_size = args.window_size
     window_scale = args.window_scale
     confusion_times = args.confusion_times
+    split_number = args.split_number
 
     return args.queue
 
 def main():
+    thread = threading.Thread(target=cleanup_edit_times, args=(edit_times, ))
+    thread.start()
     queue_num = parsearg()
     nfqueue = NetfilterQueue()
     nfqueue.bind(queue_num, modify_window)
